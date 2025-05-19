@@ -193,13 +193,13 @@ class VinePPOTrainer(Trainer):
         self.ema_state_dict = None
 
         if self.use_ema_for_mc_value:
-             print(f"INFO: EMA enabled for MC value estimation with decay {self.ema_decay}.")
-             if self.llm is None:
-                 console.print("[bold red]Error: EMA for MC value requires vLLM (`llm` instance) to be configured.[/bold red]")
-                 console.print("[yellow]Warning: Disabling EMA for MC value due to missing vLLM.[/yellow]")
-                 self.use_ema_for_mc_value = False
-                 self.ema_decay = 0.0
-             else:
+            print(f"INFO: EMA enabled for MC value estimation with decay {self.ema_decay}.")
+            if self.llm is None:
+                console.print("[bold red]Error: EMA for MC value requires vLLM (`llm` instance) to be configured.[/bold red]")
+                console.print("[yellow]Warning: Disabling EMA for MC value due to missing vLLM.[/yellow]")
+                self.use_ema_for_mc_value = False
+                self.ema_decay = 0.0
+            else:
                 # Create EMA state dict on CPU *before* preparing the main model
                 try:
                     model_to_copy = self.model # The model passed to super().__init__
@@ -736,10 +736,10 @@ class VinePPOTrainer(Trainer):
                 chosen_start_state_id = self.possible_start_state_ids[self.current_start_state_index]
 
             if chosen_start_state_id is not None:
-                 console.print(f"[blue]INFO: For this batch, starting episode rollouts from state (cycling index {self.current_start_state_index}): '{chosen_start_state_id}'[/blue]")
+                console.print(f"[blue]INFO: For this batch, starting episode rollouts from state (cycling index {self.current_start_state_index}): '{chosen_start_state_id}'[/blue]")
             else:
-                 # This case should be less likely now with cycling unless possible_start_state_ids is empty
-                 console.print(f"[yellow]INFO: No specific starting state selected for this batch. Using environment's default reset.[/yellow]")
+                # This case should be less likely now with cycling unless possible_start_state_ids is empty
+                console.print(f"[yellow]INFO: No specific starting state selected for this batch. Using environment's default reset.[/yellow]")
         else:
             console.print("[yellow]INFO: No specific starting states configured/found for diversity. Using environment's default reset behavior.[/yellow]")
         # --- End select diverse starting state ---
@@ -921,7 +921,7 @@ class VinePPOTrainer(Trainer):
                     sequence_token_counts = padded_masks.sum(dim=1).clamp(min=1.0)
 
                     if loss_type == 'grpo':
-                         # Calculate combined loss per sequence sum, then average per sequence, then mean over batch
+                        # Calculate combined loss per sequence sum, then average per sequence, then mean over batch
                         sequence_loss_sums = (padded_losses * padded_masks).sum(dim=1)
                         sequence_averages = sequence_loss_sums / sequence_token_counts
                         computed_loss = sequence_averages.mean()
@@ -1161,9 +1161,9 @@ class VinePPOTrainer(Trainer):
 
         if keep_episode:
             if self.value_variance_threshold > 0:
-                 console.print(f"[green]Keeping episode: Value variance ({value_variance:.4f}) >= threshold ({self.value_variance_threshold}) or episode length <= 1.[/green]")
+                console.print(f"[green]Keeping episode: Value variance ({value_variance:.4f}) >= threshold ({self.value_variance_threshold}) or episode length <= 1.[/green]")
             else:
-                 console.print(f"[green]Keeping episode (Filtering disabled). Variance: {value_variance:.4f}[/green]")
+                console.print(f"[green]Keeping episode (Filtering disabled). Variance: {value_variance:.4f}[/green]")
             start_buffer_idx = self.buffer.size
             for i, step_data in enumerate(episode_data):
                 is_last_step = (i == len(episode_data) - 1)
@@ -1434,7 +1434,7 @@ class VinePPOTrainer(Trainer):
             # Ensure the closing tag is present if stopping criteria found it
             closed_cleaned_output = cleaned_model_output
             if not any(closed_cleaned_output.strip().endswith(st) for st in stop_tokens_for_criteria) and \
-               any(sc.found_stop_token for sc in stopping_criteria_objects):
+                any(sc.found_stop_token for sc in stopping_criteria_objects):
                 # Append the first stop token that was found
                 for i, sc in enumerate(stopping_criteria_objects):
                     if sc.found_stop_token:
@@ -1442,7 +1442,8 @@ class VinePPOTrainer(Trainer):
                         break
             
             final_action_text = think_token_str + closed_cleaned_output # Reconstruct: <thinking>action_content</thinking>
-            match = re.search(r"^<thinking>(.*)</thinking>$", final_action_text, re.DOTALL | re.IGNORECASE)
+            # match = re.search(r"^<thinking>(.*)</thinking>$", final_action_text, re.DOTALL | re.IGNORECASE)
+            match = re.search(r"^<thinking>(.*)</thinking>", final_action_text, re.DOTALL | re.IGNORECASE)
             has_tag_and_correct_format = bool(match)
         else:
             # Expects: <thinking>plan</thinking><action>actual_action</action>
