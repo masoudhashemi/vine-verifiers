@@ -170,7 +170,7 @@ class VinePPOTrainer(Trainer):
                 temp_env_instance = self.env_factory()
                 # Check if the instantiated env is TwoTreasuresMazeGymEnv
                 if isinstance(temp_env_instance, TwoTreasuresMazeGymEnv) or \
-                   (hasattr(temp_env_instance, 'env') and isinstance(temp_env_instance.env, TwoTreasuresMazeGymEnv)):
+                    (hasattr(temp_env_instance, 'env') and isinstance(temp_env_instance.env, TwoTreasuresMazeGymEnv)):
                     self.is_two_treasures_maze = True
                     console.print("[blue]INFO: Detected TwoTreasuresMazeGymEnv. Will use <thinking>action</thinking> format.[/blue]")
                 else:
@@ -220,8 +220,8 @@ class VinePPOTrainer(Trainer):
             
             # Guard the init_communicator call
             if self.accelerator is None or \
-               self.accelerator.state.distributed_type == 'NO' or \
-               self.accelerator.is_main_process:
+                self.accelerator.state.distributed_type == 'NO' or \
+                self.accelerator.is_main_process:
                 try:
                     logger.info(f"[{self.__class__.__name__}] Main process (or single process) attempting to initialize VLLMClient communicator.")
                     self.vllm_client.init_communicator()
@@ -264,20 +264,20 @@ class VinePPOTrainer(Trainer):
             # Create EMA state dict on CPU *before* preparing the main model, regardless of vLLM backend for MC
             # This state dict is for the *policy model* being trained.
             try:
-                    model_to_copy = self.model # The model passed to super().__init__
-                    # self.ema_model = copy.deepcopy(model_to_copy)
-                    # self.ema_model.eval()
-                    # for param in self.ema_model.parameters():
-                    #     param.requires_grad = False
-                    self.ema_state_dict = {k: v.cpu().detach().clone() for k, v in model_to_copy.state_dict().items()}
-                    print("INFO: Created EMA state dict on CPU.")
-                except Exception as e:
-                    console.print(f"[bold red]Error creating EMA state dict: {e}[/bold red]")
-                    console.print("[yellow]Warning: Disabling EMA for MC value due to creation error.[/yellow]")
-                    # self.ema_model = None
-                    self.ema_state_dict = None
-                    self.use_ema_for_mc_value = False
-                    self.ema_decay = 0.0
+                model_to_copy = self.model # The model passed to super().__init__
+                # self.ema_model = copy.deepcopy(model_to_copy)
+                # self.ema_model.eval()
+                # for param in self.ema_model.parameters():
+                #     param.requires_grad = False
+                self.ema_state_dict = {k: v.cpu().detach().clone() for k, v in model_to_copy.state_dict().items()}
+                print("INFO: Created EMA state dict on CPU.")
+            except Exception as e:
+                console.print(f"[bold red]Error creating EMA state dict: {e}[/bold red]")
+                console.print("[yellow]Warning: Disabling EMA for MC value due to creation error.[/yellow]")
+                # self.ema_model = None
+                self.ema_state_dict = None
+                self.use_ema_for_mc_value = False
+                self.ema_decay = 0.0
         else:
             print("INFO: EMA for MC value estimation is disabled.")
         # --- End EMA Model Initialization ---
@@ -342,13 +342,13 @@ class VinePPOTrainer(Trainer):
                     torch_dtype=model_dtype # Use the stored dtype
                 )
                 self.ref_model.load_state_dict(initial_state_dict)
-                self.ref_model.eval()
-                for param in self.ref_model.parameters():
-                    param.requires_grad = False
+                # self.ref_model.eval() # Removed, handled by prepare_model
+                # for param in self.ref_model.parameters(): # Removed, handled by prepare_model
+                #     param.requires_grad = False # Removed, handled by prepare_model
 
-                self.ref_model.to(self.accelerator.device)
-                # self.ref_model = self.accelerator.prepare_model(self.ref_model, evaluation_mode=True)
-                print(f"INFO: Prepared reference model device: {self.accelerator.device}") # Should match main model
+                # self.ref_model.to(self.accelerator.device) # Replaced by prepare_model
+                self.ref_model = self.accelerator.prepare_model(self.ref_model, evaluation_mode=True)
+                print(f"INFO: Prepared reference model device: {self.ref_model.device}") # Log actual device of ref_model
             except Exception as e:
                 console.print(f"[bold red]Error creating or preparing reference model: {e}[/bold red]")
                 console.print("[yellow]Warning: Proceeding without reference model due to error.[/yellow]")
@@ -460,7 +460,7 @@ class VinePPOTrainer(Trainer):
                 logger.warning("Could not determine state dict to load into local vLLM (self.llm).")
         else:
             if self.accelerator.is_main_process: # Log only on main process if no usable vLLM backend
-                 logger.debug("No vLLM backend (server or local) configured for model update in _update_vllm_model.")
+                logger.debug("No vLLM backend (server or local) configured for model update in _update_vllm_model.")
 
 
     def _mc_value(self, env: Any, chat_history: List[Dict[str, str]], main_episode_current_step: int, main_episode_max_steps: int) -> float:
@@ -566,22 +566,22 @@ class VinePPOTrainer(Trainer):
                     # Assuming completion_token_ids_list is List[List[int]] based on subtask description
                     generated_texts = []
                     if isinstance(completion_token_ids_outer_list, list) and \
-                       all(isinstance(ids, list) for ids in completion_token_ids_outer_list) and \
-                       all(isinstance(token_id, int) for ids in completion_token_ids_outer_list for token_id in ids):
+                        all(isinstance(ids, list) for ids in completion_token_ids_outer_list) and \
+                        all(isinstance(token_id, int) for ids in completion_token_ids_outer_list for token_id in ids):
                         for token_ids in completion_token_ids_outer_list:
                             generated_texts.append(self.processing_class.decode(token_ids))
                     elif isinstance(completion_token_ids_outer_list, list) and \
-                         all(isinstance(item, dict) for item in completion_token_ids_outer_list):
-                         # This case handles if the client still returns dicts like {"text": "output"} per prompt
-                         logger.warning("VLLMClient.generate returned list of dicts, expected list of token ID lists. Attempting to parse 'text' field.")
-                         for item_dict in completion_token_ids_outer_list:
-                             if "text" in item_dict and isinstance(item_dict["text"], str):
-                                 generated_texts.append(item_dict["text"])
-                             elif "text" in item_dict and isinstance(item_dict["text"], list) and item_dict["text"] and isinstance(item_dict["text"][0], str):
-                                 generated_texts.append(item_dict["text"][0]) # Taking first string if list of strings
-                             else:
-                                 logger.error(f"Could not extract text from VLLMClient response dict: {item_dict}")
-                                 generated_texts.append("") # Fallback
+                        all(isinstance(item, dict) for item in completion_token_ids_outer_list):
+                        # This case handles if the client still returns dicts like {"text": "output"} per prompt
+                        logger.warning("VLLMClient.generate returned list of dicts, expected list of token ID lists. Attempting to parse 'text' field.")
+                        for item_dict in completion_token_ids_outer_list:
+                            if "text" in item_dict and isinstance(item_dict["text"], str):
+                                generated_texts.append(item_dict["text"])
+                            elif "text" in item_dict and isinstance(item_dict["text"], list) and item_dict["text"] and isinstance(item_dict["text"][0], str):
+                                generated_texts.append(item_dict["text"][0]) # Taking first string if list of strings
+                            else:
+                                logger.error(f"Could not extract text from VLLMClient response dict: {item_dict}")
+                                generated_texts.append("") # Fallback
                     else:
                         logger.error(f"Unexpected response format from VLLMClient.generate. Expected List[List[int]] or List[Dict], got: {type(completion_token_ids_outer_list)}. Content: {str(completion_token_ids_outer_list)[:200]}")
                         generated_texts = [""] * len(prompts_for_vllm) # Fallback to empty strings
@@ -614,7 +614,7 @@ class VinePPOTrainer(Trainer):
                 next_state, env_reward, done, truncated, _ = rollout["env"].step(action)
 
                 # Calculate PPO-specific formatting reward
-                ppo_formatting_reward, _ = self._calculate_ppo_reward_and_validity(action, rollout["env"])
+                ppo_formatting_reward, is_action_valid = self._calculate_ppo_reward_and_validity(action, rollout["env"])
                 
                 # Combine rewards
                 total_step_reward = env_reward + ppo_formatting_reward
@@ -1247,17 +1247,17 @@ class VinePPOTrainer(Trainer):
             # --- Determine Value Estimate V(s) ---
             estimated_value = 0.0
             state_id = env.current_state_id      
-            ppo_reward, is_action_valid = self._calculate_ppo_reward_and_validity(action, env)
+            ppo_formatting_reward, is_action_valid = self._calculate_ppo_reward_and_validity(action, env)
             
             if self.use_q_table_value and self.v_table is not None:
                 # Use the pre-computed V(s) from the V-table
                 # Use the average V-value as fallback if state_id not in table
                 estimated_value = self.v_table.get(state_id, self.average_v_table_value)
-                console.print(f"[blue]Using V-table value for state {state_id}: {estimated_value:.2f} (PPO Reward: {ppo_reward:.2f}, Valid: {is_action_valid})[/blue]")
+                console.print(f"[blue]Using V-table value for state {state_id}: {estimated_value:.2f} (PPO Reward: {ppo_formatting_reward:.2f}, Valid: {is_action_valid})[/blue]")
             else:
                 # Use Monte Carlo simulation to estimate V(s)
                 # The raw_estimated_value from _mc_value is used, and then propagated in buffer.
-                console.print(f"[blue]Using MC estimation for state {state_id} (PPO Reward: {ppo_reward:.2f}, Valid: {is_action_valid})[/blue]")
+                console.print(f"[blue]Using MC estimation for state {state_id} (PPO Reward: {ppo_formatting_reward:.2f}, Valid: {is_action_valid})[/blue]")
                 if not is_action_valid:
                     estimated_value = 0.0
                 else:
@@ -1277,7 +1277,7 @@ class VinePPOTrainer(Trainer):
 
             next_state_text, reward, done, truncated, info = env.step(action)
 
-            reward += ppo_reward
+            reward += ppo_formatting_reward
 
             if not is_action_valid:
                 console.print(f"[bold red]Applied penalty for missing action tag. Reward: {reward}[/bold red]")
