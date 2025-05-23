@@ -3,6 +3,7 @@ import copy
 import os
 import numpy as np
 import torch
+import logging # Added
 from torch import nn
 from transformers import Trainer, StoppingCriteria, StoppingCriteriaList, AutoModelForCausalLM
 from typing import List, Tuple, Any, Optional, Union, Dict
@@ -35,6 +36,7 @@ else:
     DeepSpeedEngine = None
 
 console = Console()
+logger = logging.getLogger(__name__) # Added
 
 
 class StopOnActionTag(StoppingCriteria):
@@ -85,15 +87,22 @@ class VinePPOMCTSTrainer(Trainer): # Renamed class
         clip_eps_low: Optional[float] = None, # New
         clip_eps_high: Optional[float] = None, # New
         beta: float = 0.1,
-        generation_temperature: float = 0.7, # New
-        q_table: Optional[Dict[Tuple[str, str], float]] = None, # For V-table initialization
-        vllm_llm=None, # Pass the initialized vLLM model
+        generation_temperature: float = 0.7, 
+        q_table: Optional[Dict[Tuple[str, str], float]] = None, 
+        # vllm_llm=None, # Removed
         block_size: int = 2048,
         use_ref_model: bool = True,
-        ref_model_update_steps: int = 0, # New, default 0 to disable
-        history_window_size: Optional[int] = None, # New
-        entropy_coeff: float = 0.01, # New
-        loss_type: str = "default", # New
+        ref_model_update_steps: int = 0, 
+        history_window_size: Optional[int] = None, 
+        entropy_coeff: float = 0.01, 
+        loss_type: str = "default", 
+        # Added VLLM Client parameters
+        llm_instance=None, # Added llm_instance back
+        use_vllm_server: bool = False,
+        vllm_host: str = "0.0.0.0",
+        vllm_server_port: int = 8000,
+        vllm_group_port: int = 51216,
+        vllm_connection_timeout: float = 60.0,
         *args,
         **kwargs,
     ):
@@ -106,24 +115,75 @@ class VinePPOMCTSTrainer(Trainer): # Renamed class
         self.mc_top_p = mc_top_p
         self.rollout_batch_size = rollout_batch_size
         self.gamma = gamma
-        # Handle clipping epsilon: Use low/high if provided, else fallback to single clip_eps
         self.clip_eps_low = clip_eps_low if clip_eps_low is not None else clip_eps
         self.clip_eps_high = clip_eps_high if clip_eps_high is not None else clip_eps
         self.beta = beta
         self.generation_temperature = generation_temperature
-        self.q_table = q_table # Store Q-table if provided for initialization
-        self.vllm_llm = vllm_llm
+        self.q_table = q_table
         self.use_ref_model = use_ref_model
         self.ref_model_update_steps = ref_model_update_steps
         self.history_window_size = history_window_size
         self.entropy_coeff = entropy_coeff
         self.loss_type = loss_type
 
+        # Store VLLM client parameters
+        self.use_vllm_server = use_vllm_server
+        self.vllm_host = vllm_host
+        self.vllm_server_port = vllm_server_port
+        self.vllm_group_port = vllm_group_port
+        self.vllm_connection_timeout = vllm_connection_timeout
+        
         # Initialize V-table and visit counts for MCTS-like updates
-        self.v_table = defaultdict(float) # Default value is 0.0
-        self.visit_counts = defaultdict(int) # Default count is 0
+        self.v_table = defaultdict(float) 
+        self.visit_counts = defaultdict(int) 
 
         self.accelerator = Accelerator(device_placement=False)
+
+        # Initialize self.llm and self.vllm_client based on use_vllm_server and llm_instance
+        self.vllm_client = None
+        self.llm = None # This is for the local vLLM instance (renamed from self.vllm_llm)
+
+        if self.use_vllm_server:
+            from verifiers.utils.vllm_client import VLLMClient # Ensure import is here
+            logger.info(f"[{self.__class__.__name__}] Initializing VLLMClient for server at {self.vllm_host}:{self.vllm_server_port}")
+            from verifiers.utils.vllm_client import VLLMClient # Ensure import is here
+            logger.info(f"[{self.__class__.__name__}] Initializing VLLMClient for server at {self.vllm_host}:{self.vllm_server_port}")
+            
+            model_ref_name = "trainer_model_ref_mcts" # Placeholder for VLLMClient
+            # self.model is not fully initialized by super().__init__ yet, so cannot access self.model.config here.
+            # Using a fixed placeholder is safer.
+            
+            self.vllm_client = VLLMClient(
+                model=model_ref_name, 
+                host=self.vllm_host,
+                server_port=self.vllm_server_port,
+                group_port=self.vllm_group_port,
+                connection_timeout=self.vllm_connection_timeout
+            )
+            
+            # Guard the init_communicator call
+            if self.accelerator is None or \
+               self.accelerator.state.distributed_type == 'NO' or \
+               self.accelerator.is_main_process:
+                try:
+                    logger.info(f"[{self.__class__.__name__}] Main process (or single process) attempting to initialize VLLMClient communicator.")
+                    self.vllm_client.init_communicator()
+                    logger.info(f"[{self.__class__.__name__}] VLLMClient communicator initialized by main process (or single process).")
+                except Exception as e:
+                    logger.error(f"[{self.__class__.__name__}] Error initializing VLLMClient communicator for main process: {e}", exc_info=True)
+                    # Depending on desired behavior, might re-raise or mark client as unusable for comms
+            else:
+                logger.info(f"[{self.__class__.__name__}] Non-main process (local rank {self.accelerator.process_index}) will not initialize VLLMClient communicator for weight sync. Client can still be used for API calls like generate.")
+
+            if llm_instance is not None: # This warning remains the same
+                logger.warning(f"[{self.__class__.__name__}] 'llm_instance' was provided but 'use_vllm_server' is True. The local 'llm_instance' will be ignored.")
+        else: # Not using VLLM server, try to use local llm_instance
+            if llm_instance is not None:
+                self.llm = llm_instance
+                logger.info(f"[{self.__class__.__name__}] Using provided local vLLM instance (self.llm).")
+            else:
+                logger.warning(f"[{self.__class__.__name__}] 'use_vllm_server' is False and no 'llm_instance' provided. Monte Carlo rollouts will not function.")
+
 
         if not hasattr(self.args, 'include_num_input_tokens_seen'):
             self.args.include_num_input_tokens_seen = False
@@ -237,23 +297,31 @@ class VinePPOMCTSTrainer(Trainer): # Renamed class
         return self.accelerator.prepare(dataloader)
 
     def _update_vllm_model(self):
-        """Synchronize vLLM's model weights with the current training model. TODO: Verify deepspeed compatibility."""
-        if self.vllm_llm is None:
-            # console.print("[yellow]Warning: vLLM model not available for weight update.[/yellow]")
+        """Synchronize vLLM's model weights with the current training model."""
+        if not self.accelerator.is_main_process:
             return
-        if self.accelerator.is_main_process:
-            # Simple version (may fail with ZeRO-3 without gathering):
+
+        if self.use_vllm_server and self.vllm_client:
             try:
-                # Use accelerator.unwrap_model before getting state_dict
+                # self.model is the main policy model, already prepared by accelerator
+                self.vllm_client.update_model_params(self.model)
+                logger.info(f"[{self.__class__.__name__}] Successfully updated VLLM server weights with Main policy model.")
+            except Exception as e:
+                logger.error(f"[{self.__class__.__name__}] Error updating VLLM server weights: {e}", exc_info=True)
+        elif not self.use_vllm_server and self.llm and self.accelerator.is_main_process: # Changed self.vllm_llm to self.llm
+            # Existing logic for local vLLM instance
+            try:
                 unwrapped_model = self.accelerator.unwrap_model(self.model)
                 state_dict = unwrapped_model.state_dict()
-                # Access vLLM model - this path might change based on vLLM version
-                llm_model = self.vllm_llm.llm_engine.model_executor.driver_worker.model_runner.model
-                llm_model.load_weights(state_dict.items())
-                # console.print("[green]Updated vLLM model weights.[/green]")
+                llm_model_instance = self.llm.llm_engine.model_executor.driver_worker.model_runner.model # Changed self.vllm_llm to self.llm
+                llm_model_instance.load_weights(list(state_dict.items())) 
+                logger.info(f"[{self.__class__.__name__}] Updated local vLLM (self.llm) weights with Main policy model.")
             except Exception as e:
-                console.print(f"[bold red]Error updating vLLM weights: {e}[/bold red]")
-            # Add DeepSpeed ZeRO-3 handling here if necessary
+                logger.error(f"[{self.__class__.__name__}] Error updating local vLLM (self.llm) weights: {e}", exc_info=True)
+        else:
+            if self.accelerator.is_main_process: # Log only on main process if no usable vLLM backend
+                 logger.debug("MCTS: No vLLM backend (server or local) configured for model update in _update_vllm_model.")
+
 
     def _truncate_history(self, chat_history: List[Dict[str, str]]) -> List[Dict[str, str]]:
         """Truncates chat history to include system prompt and last N messages."""
@@ -297,11 +365,14 @@ class VinePPOMCTSTrainer(Trainer): # Renamed class
         Uses history truncation and generation temperature.
         If has_action_tag is False, return a negative value based on remaining steps.
         """
-        if self.vllm_llm is None:
-            console.print("[bold red]Error: vLLM model not available for MC rollouts. Returning 0 value.[/bold red]")
-            return 0.0, []
+        # Determine vLLM backend
+        active_vllm_backend_available = (self.use_vllm_server and self.vllm_client) or \
+                                        (not self.use_vllm_server and self.llm) # Changed self.vllm_llm to self.llm
 
-        # Get state ID for the root node of the MC search
+        if not active_vllm_backend_available:
+            logger.error(f"[{self.__class__.__name__}] _mc_value called but neither VLLMClient nor local vLLM (self.llm) is available.")
+            return 0.0, []
+        
         try:
             root_state_id = env.current_state_id
         except AttributeError:
@@ -375,10 +446,52 @@ class VinePPOMCTSTrainer(Trainer): # Renamed class
             )
 
             # Use llm.generate with the pre-formatted prompt strings
-            llm_responses = self.vllm_llm.generate(messages_to_process_vllm, sampling_params=sampling_params, use_tqdm=False)
+            generated_texts = []
+            if self.use_vllm_server and self.vllm_client:
+                logger.debug(f"MCTS: Using VLLMClient for MC generation. Prompts: {len(messages_to_process_vllm)}")
+                client_sampling_params = {
+                    "n": sampling_params.n,
+                    "temperature": sampling_params.temperature,
+                    "top_p": sampling_params.top_p,
+                    "top_k": sampling_params.top_k if hasattr(sampling_params, 'top_k') else -1, # vLLM uses top_k
+                    "max_tokens": sampling_params.max_tokens,
+                    "repetition_penalty": sampling_params.repetition_penalty if hasattr(sampling_params, 'repetition_penalty') else 1.0,
+                    "stop": sampling_params.stop if hasattr(sampling_params, 'stop') else None,
+                    "include_stop_str_in_output": sampling_params.include_stop_str_in_output if hasattr(sampling_params, 'include_stop_str_in_output') else False,
+                }
+                try:
+                    completion_token_ids_list = self.vllm_client.generate(
+                        prompts=messages_to_process_vllm, # This is a list of strings
+                        **client_sampling_params
+                    )
+                    # Assuming completion_token_ids_list is List[List[int]]
+                    if isinstance(completion_token_ids_list, list) and \
+                       all(isinstance(ids, list) for ids in completion_token_ids_list) and \
+                       all(isinstance(token_id, int) for ids in completion_token_ids_list for token_id in ids):
+                        for token_ids in completion_token_ids_list:
+                            generated_texts.append(self.processing_class.decode(token_ids))
+                    else: # Fallback parsing if client returned dicts (less likely with direct VLLMClient)
+                        logger.warning(f"MCTS: VLLMClient.generate returned unexpected format. Expected List[List[int]], got {type(completion_token_ids_list)}. Attempting fallback parse.")
+                        if isinstance(completion_token_ids_list, list) and all(isinstance(item, dict) for item in completion_token_ids_list):
+                             for item_dict in completion_token_ids_list:
+                                 if "text" in item_dict and isinstance(item_dict["text"], str):
+                                     generated_texts.append(item_dict["text"])
+                                 elif "text" in item_dict and isinstance(item_dict["text"], list) and item_dict["text"] and isinstance(item_dict["text"][0], str):
+                                     generated_texts.append(item_dict["text"][0])
+                                 else: generated_texts.append("") # Fallback for dict item
+                        else: # Final fallback if parsing fails
+                            logger.error(f"MCTS: Could not parse VLLMClient response. Content: {str(completion_token_ids_list)[:200]}")
+                            generated_texts = [""] * len(messages_to_process_vllm)
+                except Exception as e:
+                    logger.error(f"[{self.__class__.__name__}] Error during VLLMClient generation: {e}", exc_info=True)
+                    generated_texts = [""] * len(messages_to_process_vllm) # Fallback on error
 
-            # Extract generated texts
-            generated_texts = [response.outputs[0].text for response in llm_responses]
+            elif not self.use_vllm_server and self.llm: # Changed self.vllm_llm to self.llm
+                logger.debug(f"[{self.__class__.__name__}] Using local LLM (self.llm) for MC generation. Prompts: {len(messages_to_process_vllm)}")
+                llm_responses = self.llm.generate(messages_to_process_vllm, sampling_params=sampling_params, use_tqdm=False) # Changed self.vllm_llm to self.llm
+                generated_texts = [response.outputs[0].text for response in llm_responses]
+            # No 'else' needed here because active_vllm_backend_available check at start of function handles it.
+
 
             for j, idx in enumerate(indices_to_process_vllm):
                 rollout = rollouts[idx]

@@ -61,14 +61,29 @@ def parse_args():
                         help="Number of episodes to collect before a PPO update")
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed")
+    
+    # Local vLLM specific arguments
     parser.add_argument("--vllm_device", type=str, default="cuda:1",
-                        help="Device to run vLLM on")
+                        help="Device for local vLLM instance (if not using server). E.g., 'cuda:0'.")
     parser.add_argument("--vllm_gpu_memory_utilization", type=float, default=0.99,
-                        help="GPU memory utilization for vLLM")
+                        help="GPU memory utilization for local vLLM instance.")
     parser.add_argument("--vllm_dtype", type=str, default="float16",
-                        help="Data type for vLLM (float16, bfloat16)")
+                        help="Data type for local vLLM (float16, bfloat16).")
+
+    # VLLM Server arguments
+    parser.add_argument("--use_vllm_server", action="store_true",
+                        help="Use a remote VLLM server instead of a local vLLM instance.")
+    parser.add_argument("--vllm_host", type=str, default="0.0.0.0",
+                        help="Hostname for the VLLM server.")
+    parser.add_argument("--vllm_server_port", type=int, default=8000,
+                        help="Port for the VLLM server API.")
+    parser.add_argument("--vllm_group_port", type=int, default=51216,
+                        help="Group port for VLLM server communication.")
+    parser.add_argument("--vllm_connection_timeout", type=float, default=60.0,
+                        help="Connection timeout for VLLM server.")
+    
     parser.add_argument("--block_size", type=int, default=4096,
-                        help="Maximum sequence length")
+                        help="Maximum sequence length (used by local vLLM and potentially by tokenizer).")
     parser.add_argument("--q_table_path", type=str, default=None,
                         help="Path to the Q-table pickle file for V-table initialization (optional)")
     parser.add_argument("--no_ref_model", action="store_false", dest="use_ref_model",
@@ -156,14 +171,22 @@ def main():
         }
     )
 
-    # Initialize vLLM (potentially on a different device)
-    vllm_instance = init_vllm(
-        args.model_name,
-        args.vllm_device,
-        args.vllm_gpu_memory_utilization,
-        args.vllm_dtype,
-        args.block_size
-    )
+    # Initialize local vLLM instance if not using server
+    llm_instance_for_trainer = None
+    if not args.use_vllm_server:
+        console.print("INFO: `use_vllm_server` is False. Initializing local vLLM instance for MCTS trainer.")
+        llm_instance_for_trainer = init_vllm(
+            args.model_name,
+            args.vllm_device, 
+            args.vllm_gpu_memory_utilization,
+            args.vllm_dtype,
+            args.block_size
+        )
+    else:
+        console.print("INFO: `use_vllm_server` is True for MCTS trainer. Will attempt to connect to VLLM server.")
+        console.print("[bold yellow]Reminder: Ensure the VLLM server is running and accessible, and a NATS server is running for it to connect to.[/bold yellow]")
+        console.print(f"[yellow]The MCTS trainer will attempt to connect to: {args.vllm_host}:{args.vllm_server_port} (group port: {args.vllm_group_port})[/yellow]")
+        # No need to call init_vllm() if using server. VLLMClient handles connection.
 
     # Create environment factory
     def env_factory():
@@ -225,7 +248,14 @@ def main():
         beta=args.beta,
         generation_temperature=args.generation_temperature,
         q_table=q_table,
-        vllm_llm=vllm_instance,
+        # Pass the potentially None llm_instance_for_trainer
+        llm_instance=llm_instance_for_trainer,
+        # Pass VLLM Server related args
+        use_vllm_server=args.use_vllm_server,
+        vllm_host=args.vllm_host,
+        vllm_server_port=args.vllm_server_port,
+        vllm_group_port=args.vllm_group_port,
+        vllm_connection_timeout=args.vllm_connection_timeout,
         block_size=args.block_size,
         use_ref_model=args.use_ref_model,
         ref_model_update_steps=args.ref_model_update_steps,
