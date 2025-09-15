@@ -180,20 +180,62 @@ def run_human_interactive(max_steps: int = 25, start_maze_idx: Optional[str] = N
     return True 
 
 
-def run_llm_interactive(model_name: str, max_steps: int = 25, start_maze_idx: Optional[str] = None,
-                        vllm_device="cuda", gpu_memory_utilization=0.9, 
-                        vllm_dtype="auto", enable_prefix_caching=True, 
-                        max_model_len=None):
-    """Run an interactive game where an LLM makes all decisions for TwoTreasuresMazeGymEnv."""
-    logger.info(f"Loading model: {model_name}")
-    model = LLM(
+def _set_cuda_visible_from_device_arg(vllm_device: str) -> None:
+    """Translate a `vllm_device` like 'cuda:1' or 'cuda:0,2' into CUDA_VISIBLE_DEVICES."""
+    if not vllm_device:
+        return
+    dev = str(vllm_device).strip().lower()
+    if dev.startswith("cuda:"):
+        indices = dev.split(":", 1)[1].strip()
+        if indices:
+            normalized = ",".join([p.strip() for p in indices.split(",") if p.strip()])
+            if normalized:
+                os.environ["CUDA_VISIBLE_DEVICES"] = normalized
+                logger.info(f"Using CUDA_VISIBLE_DEVICES={normalized} for vLLM")
+    elif dev == "cpu":
+        logger.warning("vLLM CPU mode is not supported in this setup; attempting default CUDA.")
+
+def _build_vllm_kwargs(model_name: str,
+                       gpu_memory_utilization: float,
+                       dtype: str,
+                       enable_prefix_caching: bool,
+                       max_model_len: Optional[int],
+                       vllm_max_seqs: Optional[int]):
+    import inspect
+    try:
+        from vllm.engine.arg_utils import EngineArgs  # type: ignore
+        params = set(inspect.signature(EngineArgs.__init__).parameters.keys())
+    except Exception:
+        params = set()
+    kwargs = dict(
         model=model_name,
-        device=vllm_device,
         gpu_memory_utilization=gpu_memory_utilization,
-        dtype=vllm_dtype,
+        dtype=dtype,
         enable_prefix_caching=enable_prefix_caching,
         max_model_len=max_model_len,
     )
+    if vllm_max_seqs is not None:
+        if 'max_num_seqs' in params:
+            kwargs['max_num_seqs'] = int(vllm_max_seqs)
+            logger.info(f"vLLM: Setting max_num_seqs={vllm_max_seqs} per GPU")
+        elif 'max_num_batched_tokens' in params and max_model_len:
+            approx_tokens = int(vllm_max_seqs) * int(max_model_len)
+            kwargs['max_num_batched_tokens'] = approx_tokens
+            logger.info(f"vLLM: Using max_num_batched_tokens={approx_tokens} (≈ {vllm_max_seqs} seqs × block_size)")
+        else:
+            logger.warning("vLLM: No max_num_seqs/max_num_batched_tokens available; proceeding without explicit cap.")
+    return kwargs
+
+
+def run_llm_interactive(model_name: str, max_steps: int = 25, start_maze_idx: Optional[str] = None,
+                        vllm_device="cuda", gpu_memory_utilization=0.9, 
+                        vllm_dtype="auto", enable_prefix_caching=True, 
+                        max_model_len=None, vllm_max_seqs: Optional[int] = None):
+    """Run an interactive game where an LLM makes all decisions for TwoTreasuresMazeGymEnv."""
+    logger.info(f"Loading model: {model_name}")
+    _set_cuda_visible_from_device_arg(vllm_device)
+    kwargs = _build_vllm_kwargs(model_name, gpu_memory_utilization, vllm_dtype, enable_prefix_caching, max_model_len, vllm_max_seqs)
+    model = LLM(**kwargs)
     
     continue_playing = True
     last_game_won_t2 = False
@@ -417,10 +459,9 @@ def run_batch_evaluation(mode: str, num_trials: int = 10, model_name: Optional[s
             return 0,0,0,0, {}
         logger.info(f"Loading model: {model_name}")
         try:
-            model_loaded = LLM(
-                model=model_name, device=vllm_device, gpu_memory_utilization=gpu_memory_utilization,
-                dtype=vllm_dtype, enable_prefix_caching=enable_prefix_caching, max_model_len=max_model_len,
-            )
+            _set_cuda_visible_from_device_arg(vllm_device)
+            kwargs = _build_vllm_kwargs(model_name, gpu_memory_utilization, vllm_dtype, enable_prefix_caching, max_model_len, vllm_max_seqs)
+            model_loaded = LLM(**kwargs)
         except Exception as e:
             logger.error(f"Error initializing model: {e}")
             return 0,0,0,0, {}
@@ -618,6 +659,8 @@ def main():
                         help="Disable prefix caching")
     parser.add_argument("--vllm_max_model_len", type=int, default=None,
                         help="Maximum model sequence length")
+    parser.add_argument("--vllm_max_seqs", type=int, default=None,
+                        help="Max sequences per GPU scheduled by vLLM (caps per-GPU batch size)")
     
     args = parser.parse_args()
 
@@ -635,7 +678,8 @@ def main():
             gpu_memory_utilization=args.vllm_gpu_memory_utilization,
             vllm_dtype=args.vllm_dtype,
             enable_prefix_caching=args.vllm_enable_prefix_caching,
-            max_model_len=args.vllm_max_model_len
+            max_model_len=args.vllm_max_model_len,
+            vllm_max_seqs=args.vllm_max_seqs
         )
     elif args.mode == "random":
         run_random_interactive(
@@ -653,7 +697,8 @@ def main():
             gpu_memory_utilization=args.vllm_gpu_memory_utilization,
             vllm_dtype=args.vllm_dtype,
             enable_prefix_caching=args.vllm_enable_prefix_caching,
-            max_model_len=args.vllm_max_model_len
+            max_model_len=args.vllm_max_model_len,
+            vllm_max_seqs=args.vllm_max_seqs,
         )
 
 if __name__ == "__main__":

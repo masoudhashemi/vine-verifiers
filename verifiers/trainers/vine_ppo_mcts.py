@@ -94,6 +94,7 @@ class VinePPOMCTSTrainer(Trainer): # Renamed class
         history_window_size: Optional[int] = None, # New
         entropy_coeff: float = 0.01, # New
         loss_type: str = "default", # New
+        vllm_max_seqs: Optional[int] = None,
         *args,
         **kwargs,
     ):
@@ -118,6 +119,7 @@ class VinePPOMCTSTrainer(Trainer): # Renamed class
         self.history_window_size = history_window_size
         self.entropy_coeff = entropy_coeff
         self.loss_type = loss_type
+        self.vllm_max_seqs = vllm_max_seqs
 
         # Initialize V-table and visit counts for MCTS-like updates
         self.v_table = defaultdict(float) # Default value is 0.0
@@ -374,11 +376,17 @@ class VinePPOMCTSTrainer(Trainer): # Renamed class
                 stop=["</action>", "</Action>"],
             )
 
-            # Use llm.generate with the pre-formatted prompt strings
-            llm_responses = self.vllm_llm.generate(messages_to_process_vllm, sampling_params=sampling_params, use_tqdm=False)
-
-            # Extract generated texts
-            generated_texts = [response.outputs[0].text for response in llm_responses]
+            # Use llm.generate; chunk to respect vllm_max_seqs if set
+            if self.vllm_max_seqs is None or self.vllm_max_seqs <= 0:
+                llm_responses = self.vllm_llm.generate(messages_to_process_vllm, sampling_params=sampling_params, use_tqdm=False)
+                generated_texts = [response.outputs[0].text for response in llm_responses]
+            else:
+                generated_texts = []
+                chunk = int(self.vllm_max_seqs)
+                for start in range(0, len(messages_to_process_vllm), chunk):
+                    sub_prompts = messages_to_process_vllm[start:start+chunk]
+                    sub_responses = self.vllm_llm.generate(sub_prompts, sampling_params=sampling_params, use_tqdm=False)
+                    generated_texts.extend([r.outputs[0].text for r in sub_responses])
 
             for j, idx in enumerate(indices_to_process_vllm):
                 rollout = rollouts[idx]

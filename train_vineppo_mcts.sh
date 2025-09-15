@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 export HF_TOKEN=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
+export WANDB_API_KEY=475b4ed6f1a5029a6215b025c05ac280820fe7ce
+
 export HF_HOME=/mnt/core_llm/masoud/model_cache
 export HF_HUB_CACHE=/mnt/core_llm/masoud/model_cache
 export HF_HUB_CACHE_DIR=/mnt/core_llm/masoud/model_cache
 export TRANSFORMERS_CACHE=/mnt/core_llm/masoud/model_cache
 
-# WandB Configuration (Set your API key here or via environment variables)
-export WANDB_API_KEY="475b4ed6f1a5029a6215b025c05ac280820fe7ce"
 export WANDB_PROJECT="vineppo_mcts_imprisoned" # Updated project name
 export WANDB_RUN_ID=$(date +%Y%m%d_%H%M%S)_$(echo "$MODEL_NAME" | tr '/' '_')_mcts
 

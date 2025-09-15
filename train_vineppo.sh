@@ -1,22 +1,27 @@
 #!/usr/bin/env bash
 export HF_TOKEN=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
+export WANDB_API_KEY=475b4ed6f1a5029a6215b025c05ac280820fe7ce
+
 export HF_HOME=/mnt/core_llm/masoud/model_cache
 export HF_HUB_CACHE=/mnt/core_llm/masoud/model_cache
 export HF_HUB_CACHE_DIR=/mnt/core_llm/masoud/model_cache
 export TRANSFORMERS_CACHE=/mnt/core_llm/masoud/model_cache
 
-# WandB Configuration (Set your API key here or via environment variables)
-export WANDB_API_KEY="475b4ed6f1a5029a6215b025c05ac280820fe7ce"
+
+ENV_TYPE="two_treasures_maze" # Default environment type, "imprisoned" or "two_treasures_maze"
+
+
 export WANDB_PROJECT="vineppo_${ENV_TYPE}"
-export WANDB_RUN_ID=$(date +%Y%m%d_%H%M%S)_$(echo "$MODEL_NAME" | tr '/' '_')_low${CLIP_EPS_LOW}_high${CLIP_EPS_HIGH}
+export WANDB_RUN_ID=$(date +%Y%m%d_%H%M%S)_$(echo "$MODEL_NAME" | tr '/' '_')
+
 
 # Default values
 MODEL_NAME="Qwen/Qwen2.5-0.5B-Instruct"
 # MODEL_NAME="Qwen/Qwen3-0.6B"
 OUTPUT_DIR="./output/vineppo_ema_${ENV_TYPE}"
 NUM_EPOCHS=1
-GRADIENT_ACCUMULATION_STEPS=6
-ROLLOUT_BATCH_SIZE=5
+GRADIENT_ACCUMULATION_STEPS=4
+ROLLOUT_BATCH_SIZE=4
 NUM_PPO_UPDATES=1000
 LEARNING_RATE=2e-6
 SCHEDULER_TYPE="constant"
@@ -28,12 +33,12 @@ BETA=0.04
 BUFFER_SIZE=1000
 MAX_STEPS=8
 MC_MAX_STEPS=8
-MC_ROLLOUTS=20
+MC_ROLLOUTS=8
 MC_TOP_P=1.0
 SEED=42
 VLLM_DEVICE="cuda:1"
-VLLM_GPU_MEMORY_UTILIZATION=0.99
-VLLM_DTYPE="float16"
+VLLM_GPU_MEMORY_UTILIZATION=0.9
+VLLM_DTYPE="bf16"
 BLOCK_SIZE=8000
 Q_TABLE_PATH=""
 USE_Q_TABLE_VALUE=false
@@ -48,7 +53,6 @@ VALUE_VARIANCE_THRESHOLD=0.0 # Default minimum variance to keep rollout, <= 0 di
 ENTROPY_COEFF=0.0 # Default coefficient for entropy bonus
 POLICY_LOSS_TYPE="ppo" # Default policy loss type, "reinforce" or "grpo"
 EMA_DECAY=0 # Default EMA decay (0 = disabled)
-ENV_TYPE="two_treasures_maze" # Default environment type, "imprisoned" or "two_treasures_maze"
 
 # Parse command line arguments
 while [ $# -gt 0 ]; do

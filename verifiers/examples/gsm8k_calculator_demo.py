@@ -67,9 +67,58 @@ def compare_answers(model_answer: str, reference_answer: str) -> Tuple[bool, str
     else:
         return False, f"Incorrect. Model: {model_number}, Reference: {reference_number}, Difference: {abs_diff}"
 
+def _set_cuda_visible_from_device_arg(vllm_device: str) -> None:
+    """Translate a `vllm_device` like 'cuda:1' or 'cuda:0,2' into CUDA_VISIBLE_DEVICES."""
+    if not vllm_device:
+        return
+    dev = str(vllm_device).strip().lower()
+    if dev.startswith("cuda:"):
+        indices = dev.split(":", 1)[1].strip()
+        if indices:
+            normalized = ",".join([p.strip() for p in indices.split(",") if p.strip()])
+            if normalized:
+                os.environ["CUDA_VISIBLE_DEVICES"] = normalized
+                print(f"Using CUDA_VISIBLE_DEVICES={normalized} for vLLM")
+    elif dev == "cpu":
+        print("Warning: vLLM CPU mode is not supported in this setup; attempting default CUDA.")
+
+
+def _build_vllm_kwargs(model_name: str,
+                       gpu_memory_utilization: float,
+                       dtype: str,
+                       enable_prefix_caching: bool,
+                       max_model_len: Optional[int],
+                       vllm_max_seqs: Optional[int]):
+    import inspect
+    try:
+        from vllm.engine.arg_utils import EngineArgs  # type: ignore
+        params = set(inspect.signature(EngineArgs.__init__).parameters.keys())
+    except Exception:
+        params = set()
+    kwargs = dict(
+        model=model_name,
+        gpu_memory_utilization=gpu_memory_utilization,
+        dtype=dtype,
+        enable_prefix_caching=enable_prefix_caching,
+        max_model_len=max_model_len,
+    )
+    if vllm_max_seqs is not None:
+        if 'max_num_seqs' in params:
+            kwargs['max_num_seqs'] = int(vllm_max_seqs)
+            print(f"vLLM: Setting max_num_seqs={vllm_max_seqs} per GPU")
+        elif 'max_num_batched_tokens' in params and max_model_len:
+            approx_tokens = int(vllm_max_seqs) * int(max_model_len)
+            kwargs['max_num_batched_tokens'] = approx_tokens
+            print(f"vLLM: Using max_num_batched_tokens={approx_tokens} (≈ {vllm_max_seqs} seqs × block_size)")
+        else:
+            print("vLLM: No max_num_seqs/max_num_batched_tokens available; proceeding without explicit cap.")
+    return kwargs
+
+
 def run_demo(model_name: str, example_idx: int = 0, max_steps: int = 5, 
              vllm_device="cuda", gpu_memory_utilization=0.9, 
-             vllm_dtype="auto", enable_prefix_caching=True, max_model_len=None):
+             vllm_dtype="auto", enable_prefix_caching=True, max_model_len=None,
+             vllm_max_seqs: Optional[int] = None):
     """
     Run an interactive demo of the GSM8K calculator tool environment.
     
@@ -85,14 +134,9 @@ def run_demo(model_name: str, example_idx: int = 0, max_steps: int = 5,
     """
     print(f"Loading model: {model_name}")
     # Initialize VLLM model with detailed configuration
-    model = LLM(
-        model=model_name,
-        device=vllm_device,
-        gpu_memory_utilization=gpu_memory_utilization,
-        dtype=vllm_dtype,
-        enable_prefix_caching=enable_prefix_caching,
-        max_model_len=max_model_len,
-    )
+    _set_cuda_visible_from_device_arg(vllm_device)
+    kwargs = _build_vllm_kwargs(model_name, gpu_memory_utilization, vllm_dtype, enable_prefix_caching, max_model_len, vllm_max_seqs)
+    model = LLM(**kwargs)
     
     # Initialize tool environment for GSM8K
     print("Initializing environment...")
@@ -246,7 +290,8 @@ def print_messages(messages: List[Dict[str, str]], skip_system: bool = False, sk
 
 def run_batch_evaluation(model_name: str, num_examples: int = 10, max_steps: int = 5,
                          vllm_device="cuda", gpu_memory_utilization=0.9, 
-                         vllm_dtype="auto", enable_prefix_caching=True, max_model_len=None):
+                         vllm_dtype="auto", enable_prefix_caching=True, max_model_len=None,
+                         vllm_max_seqs: Optional[int] = None):
     """
     Run batch evaluation on multiple examples and report overall accuracy.
     
@@ -262,14 +307,9 @@ def run_batch_evaluation(model_name: str, num_examples: int = 10, max_steps: int
     """
     print(f"Loading model: {model_name}")
     # Initialize VLLM model with detailed configuration
-    model = LLM(
-        model=model_name,
-        device=vllm_device,
-        gpu_memory_utilization=gpu_memory_utilization,
-        dtype=vllm_dtype,
-        enable_prefix_caching=enable_prefix_caching,
-        max_model_len=max_model_len,
-    )
+    _set_cuda_visible_from_device_arg(vllm_device)
+    kwargs = _build_vllm_kwargs(model_name, gpu_memory_utilization, vllm_dtype, enable_prefix_caching, max_model_len, vllm_max_seqs)
+    model = LLM(**kwargs)
     
     # Initialize tool environment for GSM8K
     print("Initializing environment...")
@@ -425,6 +465,8 @@ if __name__ == "__main__":
                         help="Enable prefix caching for faster generation")
     parser.add_argument("--vllm_max_model_len", type=int, default=None,
                         help="Maximum model sequence length")
+    parser.add_argument("--vllm_max_seqs", type=int, default=None,
+                        help="Max sequences per GPU scheduled by vLLM (caps per-GPU batch size)")
     
     args = parser.parse_args()
     
@@ -437,7 +479,8 @@ if __name__ == "__main__":
             args.vllm_gpu_memory_utilization,
             args.vllm_dtype,
             args.vllm_enable_prefix_caching,
-            args.vllm_max_model_len
+            args.vllm_max_model_len,
+            args.vllm_max_seqs,
         )
     else:
         run_demo(
@@ -448,5 +491,6 @@ if __name__ == "__main__":
             args.vllm_gpu_memory_utilization,
             args.vllm_dtype,
             args.vllm_enable_prefix_caching,
-            args.vllm_max_model_len
+            args.vllm_max_model_len,
+            args.vllm_max_seqs,
         )

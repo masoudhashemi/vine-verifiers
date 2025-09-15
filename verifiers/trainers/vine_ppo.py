@@ -112,6 +112,7 @@ class VinePPOTrainer(Trainer):
         value_variance_threshold: float = 0.01,
         entropy_coeff: float = 0.01,
         ema_decay: float = 0.0, # Set default to 0 to disable EMA unless specified
+        vllm_max_seqs: Optional[int] = None,
         *args,
         **kwargs,
     ):
@@ -138,6 +139,7 @@ class VinePPOTrainer(Trainer):
         self.average_v_table_value = 0.0
         self.entropy_coeff = entropy_coeff
         self.value_variance_threshold = value_variance_threshold
+        self.vllm_max_seqs = vllm_max_seqs
 
         # Add the new parameter for value variance threshold
         if self.value_variance_threshold <= 0:
@@ -440,11 +442,19 @@ class VinePPOTrainer(Trainer):
                 stop=["</action>", "</Action>"],
             )
 
-            # Use llm.generate with the prompt strings
-            llm_responses = self.llm.generate(prompts_for_vllm, sampling_params=sampling_params, use_tqdm=False)
+            # Use llm.generate with the prompt strings, chunked to respect vllm_max_seqs
+            if self.vllm_max_seqs is None or self.vllm_max_seqs <= 0:
+                llm_responses = self.llm.generate(prompts_for_vllm, sampling_params=sampling_params, use_tqdm=False)
+                generated_texts = [response.outputs[0].text for response in llm_responses]
+            else:
+                generated_texts = []
+                chunk = int(self.vllm_max_seqs)
+                for start in range(0, len(prompts_for_vllm), chunk):
+                    sub_prompts = prompts_for_vllm[start:start+chunk]
+                    sub_responses = self.llm.generate(sub_prompts, sampling_params=sampling_params, use_tqdm=False)
+                    generated_texts.extend([r.outputs[0].text for r in sub_responses])
 
-            # Extract generated texts (structure of llm_responses should be the same)
-            generated_texts = [response.outputs[0].text for response in llm_responses]
+            # Extract generated texts (already computed)
 
             for j, idx in enumerate(indices_to_process):
                 rollout = rollouts[idx]

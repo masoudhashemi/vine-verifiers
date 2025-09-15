@@ -66,13 +66,15 @@ def parse_args():
                         help="Random seed")
     # Add vLLM specific arguments
     parser.add_argument("--vllm_device", type=str, default="cuda:1", 
-                        help="Device to run vLLM on")
+                        help="GPU selection for vLLM. Use e.g. 'cuda:1' or 'cuda:0,2' to set CUDA_VISIBLE_DEVICES; 'cuda' uses the current environment.")
     parser.add_argument("--vllm_gpu_memory_utilization", type=float, default=0.99, 
                         help="GPU memory utilization for vLLM")
     parser.add_argument("--vllm_dtype", type=str, default="float16", 
                         help="Data type for vLLM (float16, bfloat16)")
     parser.add_argument("--block_size", type=int, default=8000, 
                         help="Maximum sequence length")
+    parser.add_argument("--vllm_max_seqs", type=int, default=None,
+                        help="Max sequences per GPU that vLLM schedules at once (limits per-GPU batch size). If unsupported by your vLLM version, it falls back to max_num_batched_tokens ≈ vllm_max_seqs * block_size.")
     parser.add_argument("--q_table_path", type=str, default=None, 
                         help="Path to the Q-table pickle file (optional)")
     parser.add_argument("--use_q_table_value", action="store_true", 
@@ -106,7 +108,30 @@ def parse_args():
                         help="Type of environment to use (imprisoned or two_treasures_maze)")
     return parser.parse_args()
 
-def init_vllm(model_name, vllm_device, vllm_gpu_memory_utilization, vllm_dtype, block_size):
+def _set_cuda_visible_from_device_arg(vllm_device: str) -> None:
+    """Translate a --vllm_device like 'cuda:1' or 'cuda:0,2' into CUDA_VISIBLE_DEVICES.
+
+    vLLM no longer accepts a `device` kwarg on LLM(); selecting GPUs should be done via
+    CUDA_VISIBLE_DEVICES. This helper sets the env var if the arg encodes specific indices.
+    """
+    if not vllm_device:
+        return
+    dev = str(vllm_device).strip().lower()
+    # Only handle explicit cuda indices; leave 'cuda' as-is to respect current environment
+    if dev.startswith("cuda:"):
+        indices = dev.split(":", 1)[1].strip()
+        if indices:
+            # Normalize e.g. "0, 2" -> "0,2"
+            normalized = ",".join([p.strip() for p in indices.split(",") if p.strip()])
+            if normalized:
+                os.environ["CUDA_VISIBLE_DEVICES"] = normalized
+                console.print(f"[blue]Using CUDA_VISIBLE_DEVICES={normalized} for vLLM[/blue]")
+    elif dev == "cpu":
+        # vLLM generally targets GPU; warn and do nothing (will likely error if no GPU)
+        console.print("[yellow]Warning: vLLM CPU mode is not supported in this setup; attempting default CUDA.[/yellow]")
+
+
+def init_vllm(model_name, vllm_device, vllm_gpu_memory_utilization, vllm_dtype, block_size, vllm_max_seqs=None):
     """Initialize vLLM for faster inference."""
     world_size_patch = patch("torch.distributed.get_world_size", return_value=1)
     profiling_patch = patch(
@@ -121,16 +146,54 @@ def init_vllm(model_name, vllm_device, vllm_gpu_memory_utilization, vllm_dtype, 
     else:
         torch_dtype = torch.float16
         console.print(f"[yellow]Warning: Unknown dtype {vllm_dtype}, using float16[/yellow]")
-    
-    console.print(f"Loading {model_name} on vLLM with device {vllm_device}")
+    # Configure GPU visibility for vLLM based on --vllm_device
+    _set_cuda_visible_from_device_arg(vllm_device)
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "(all)")
+    console.print(f"Loading {model_name} on vLLM (CUDA_VISIBLE_DEVICES={visible})")
     with world_size_patch, profiling_patch:
-        llm = LLM(
+        # Build kwargs dynamically based on installed vLLM EngineArgs support
+        import inspect
+        try:
+            from vllm.engine.arg_utils import EngineArgs  # type: ignore
+            engine_sig = inspect.signature(EngineArgs.__init__)
+            params = set(engine_sig.parameters.keys())
+        except Exception:
+            params = set()
+
+        llm_kwargs = dict(
             model=model_name,
-            device=vllm_device,
             gpu_memory_utilization=vllm_gpu_memory_utilization,
             max_model_len=block_size,
             dtype=torch_dtype,
         )
+        if vllm_max_seqs is not None:
+            if 'max_num_seqs' in params:
+                llm_kwargs['max_num_seqs'] = int(vllm_max_seqs)
+                console.print(f"[blue]vLLM: Setting max_num_seqs={vllm_max_seqs} per GPU[/blue]")
+            elif 'max_num_batched_tokens' in params:
+                approx_tokens = int(vllm_max_seqs) * int(block_size)
+                llm_kwargs['max_num_batched_tokens'] = approx_tokens
+                console.print(f"[blue]vLLM: Using max_num_batched_tokens={approx_tokens} (≈ {vllm_max_seqs} seqs × block_size)[/blue]")
+            else:
+                console.print("[yellow]vLLM: This version does not expose max_num_seqs/max_num_batched_tokens; proceeding without explicit batch cap.[/yellow]")
+
+        try:
+            llm = LLM(**llm_kwargs)
+        except TypeError as e:
+            # Fallback for older/newer vLLM arg names
+            if vllm_max_seqs is not None and 'max_num_seqs' in llm_kwargs:
+                console.print("[yellow]vLLM did not accept max_num_seqs; retrying with max_num_batched_tokens fallback.[/yellow]")
+                llm_kwargs.pop('max_num_seqs', None)
+                approx_tokens = int(vllm_max_seqs) * int(block_size)
+                llm_kwargs['max_num_batched_tokens'] = approx_tokens
+                try:
+                    llm = LLM(**llm_kwargs)
+                except TypeError:
+                    console.print("[yellow]vLLM did not accept max_num_batched_tokens either; proceeding without explicit batch cap.[/yellow]")
+                    llm_kwargs.pop('max_num_batched_tokens', None)
+                    llm = LLM(**llm_kwargs)
+            else:
+                raise
     return llm
 
 def main():
@@ -181,7 +244,8 @@ def main():
         args.vllm_device,
         args.vllm_gpu_memory_utilization,
         args.vllm_dtype,
-        args.block_size
+        args.block_size,
+        args.vllm_max_seqs,
     )
     
     # Create environment factory
@@ -251,6 +315,7 @@ def main():
         history_window_size=args.history_window_size,
         entropy_coeff=args.entropy_coeff,
         ema_decay=args.ema_decay,
+        vllm_max_seqs=args.vllm_max_seqs,
         value_variance_threshold=args.value_variance_threshold
     )
     
