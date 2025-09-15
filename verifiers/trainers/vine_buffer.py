@@ -114,16 +114,14 @@ class VineBuffer(Dataset):
         next_future_valid_value = 0.0
 
         for t in reversed(range(T)):
-            if self.is_actions_valid[t]:  # Action at step t was valid
-                # propagated_values[t] remains self.values[t] (already correct in the copy)
-                next_future_valid_value = propagated_values[t] # This is self.values[t]
-            else:  # Action at step t was invalid
-                if self.dones[t]:
-                    propagated_values[t] = 0.0
-                    next_future_valid_value = 0.0
-                else:
-                    propagated_values[t] = next_future_valid_value
-        
+            if self.dones[t]:  # This step ended an episode
+                propagated_values[t] = 0.0
+                next_future_valid_value = 0.0  # Reset for new episode
+            elif self.is_actions_valid[t]:  # Valid action
+                next_future_valid_value = propagated_values[t]
+            else:  # Invalid action, not terminal
+                propagated_values[t] = next_future_valid_value
+
         return propagated_values
 
     def compute_returns_and_advantages(self):
@@ -153,40 +151,45 @@ class VineBuffer(Dataset):
             gae_value_for_next_step = 0.0  # This is A_{t+1} when calculating A_t. For t=T-1, A_T = 0.
             for t in reversed(range(T)):
                 v_s_t = final_values_for_computation[t]
-                
-                # V(s_{t+1}) is final_values_for_computation[t+1] if t+1 exists, else 0.
-                # _propagate_values ensures V(terminal_state) = 0.
-                v_s_t_plus_1 = final_values_for_computation[t+1] if t + 1 < T else 0.0
-                
+
+                # Correctly handle next state value with proper episode boundary checking
+                if t + 1 < T:
+                    # Check if we're crossing an episode boundary
+                    if self.dones[t]:  # If current step ended episode, next value should be 0
+                        v_s_t_plus_1 = 0.0
+                    else:
+                        v_s_t_plus_1 = final_values_for_computation[t+1]
+                else:
+                    v_s_t_plus_1 = 0.0  # End of buffer
+
                 delta = self.rewards[t] + self.gamma * v_s_t_plus_1 - v_s_t
-                
-                # Mask for GAE propagation: 1.0 if s_{t+1} was non-terminal, else 0.0
-                mask_propagate = 0.0
-                if t + 1 < T and not self.dones[t+1]: # if s_{t+1} exists and is not terminal
-                    mask_propagate = 1.0
-                
+
+                # Only propagate GAE if we haven't crossed episode boundary
+                mask_propagate = 0.0 if self.dones[t] else 1.0
+
                 current_gae_advantage = delta + self.gamma * self.gae_lambda * mask_propagate * gae_value_for_next_step
-                
+
                 advantages[t] = current_gae_advantage
                 returns[t] = current_gae_advantage + v_s_t
-                
+
                 gae_value_for_next_step = current_gae_advantage # A_t becomes A_{t+1} for the next iteration (t-1)
 
         elif self.advantage_type == "td":
             for t in range(T):
                 v_s_t = final_values_for_computation[t]
-                
-                # V(s_{t+1})
-                v_s_t_plus_1 = 0.0
-                if not self.dones[t]: # If current state s_t is not terminal
-                    if t + 1 < T and not self.dones[t+1]: # And next state s_{t+1} is in buffer and not terminal
-                        v_s_t_plus_1 = final_values_for_computation[t+1]
-                    # else, s_{t+1} is considered terminal (value 0 for TD target calculation)
 
+                # TD target computation with proper episode boundary handling
                 td_target = self.rewards[t]
-                if not self.dones[t]: # Only add discounted next value if current is not terminal
+
+                # Only add next value if current step didn't end the episode
+                if not self.dones[t]:
+                    if t + 1 < T:
+                        # Use next state's value, but check for episode boundary
+                        v_s_t_plus_1 = final_values_for_computation[t+1]
+                    else:
+                        v_s_t_plus_1 = 0.0  # End of buffer
                     td_target += self.gamma * v_s_t_plus_1
-                
+
                 returns[t] = td_target
                 advantages[t] = td_target - v_s_t
         

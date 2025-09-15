@@ -124,8 +124,9 @@ class VineBuffer(Dataset):
                     next_non_terminal = 0.0 # No next state if last step
                     next_value = 0.0 # Assume V=0 after final state
                 else:
-                    next_non_terminal = 1.0 - dones_np[t+1] # 1 if next state is not terminal
-                    next_value = values_np[t+1]
+                    # Check if current step ended episode - if so, don't propagate GAE
+                    next_non_terminal = 0.0 if dones_np[t] else 1.0
+                    next_value = values_np[t+1] if next_non_terminal > 0.0 else 0.0
 
                 delta = rewards_np[t] + self.gamma * next_value * next_non_terminal - values_np[t]
                 last_gae_lam = delta + self.gamma * self.gae_lambda * next_non_terminal * last_gae_lam
@@ -138,8 +139,9 @@ class VineBuffer(Dataset):
                     next_non_terminal = 0.0
                     next_value = 0.0
                 else:
-                    next_non_terminal = 1.0 - dones_np[t+1]
-                    next_value = values_np[t+1]
+                    # Check if current step ended episode - if so, don't include next value
+                    next_non_terminal = 0.0 if dones_np[t] else 1.0
+                    next_value = values_np[t+1] if next_non_terminal > 0.0 else 0.0
 
                 # Calculate TD target (used for return)
                 td_target = rewards_np[t] + self.gamma * next_value * next_non_terminal
